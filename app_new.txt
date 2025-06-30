@@ -1,0 +1,290 @@
+import random
+import time
+import os
+import json
+import tkinter as tk
+from tkinter import messagebox
+from tkinter import ttk
+
+from ppadb.client import Client as AdbClient
+import concurrent.futures
+
+from icecream import ic
+
+from misc import run_and_kill_instances as raki
+from misc.common_scripts import where_i_am, get_instance_dict, this_fucking_game_run_or_not
+from actions.common_actions import find_and_click_image
+from misc.ports_ex.get_bluestack_adb_ports import get_instanses_data
+from actions.dig import dig
+from actions.comander_skills import harvest, al_tech
+import actions.common_actions as ca
+import actions.colect_res as cr
+get_instanses_data()
+client = AdbClient(host="127.0.0.1", port=5037)
+max_workers = 2
+
+instance_dict = get_instance_dict()
+instances = list(instance_dict.keys())
+
+instance_queue_1143 = [inst for inst in instances if "1143" in instance_dict[inst]["Name"]]
+instance_queue_1220 = [inst for inst in instances if "1220" in instance_dict[inst]["Name"]]
+state_file = 'state.json'
+
+def save_state(state):
+    with open(state_file, 'w') as f:
+        json.dump(state, f)
+
+def load_state():
+    if os.path.exists(state_file):
+        with open(state_file, 'r') as f:
+            return json.load(f)
+    return {"instances_done": [], "last_run_times": {}}
+
+def ask_to_continue():
+    def on_continue():
+        nonlocal choice
+        choice = "continue"
+        root.destroy()
+
+    def on_startover():
+        nonlocal choice
+        choice = "startover"
+        root.destroy()
+
+    choice = None
+
+    root = tk.Tk()
+    root.title("Выбор действия")
+
+    label = tk.Label(root, text="Хотите продолжить с места остановки или начать сначала?")
+    label.pack(padx=20, pady=10)
+
+    continue_button = tk.Button(root, text="Продолжить", command=on_continue)
+    continue_button.pack(side=tk.LEFT, padx=10, pady=10)
+
+    startover_button = tk.Button(root, text="Начать сначала", command=on_startover)
+    startover_button.pack(side=tk.RIGHT, padx=10, pady=10)
+
+    root.mainloop()
+    return choice
+
+def select_instances():
+    selected_instances = []
+    def add_instance_to_pool():
+        new_instance = instance_entry.get()
+        if new_instance and new_instance in instances:
+            instance_queue.append(new_instance)
+            update_instance_status()
+
+    def update_instance_status():
+        for var, instance, label in vars:
+            last_run_time = state["last_run_times"].get(instance, "Никогда")
+            status = "Завершено" if instance in state["instances_done"] else "В ожидании"
+            label.config(text=f'{instance_dict[instance]["Name"]} (последний запуск: {last_run_time}) - {status}')
+            if instance in state["instances_done"]:
+                label.config(bg="lightgreen")
+    def on_submit():
+        selected_instances[:] = [instance for var, instance in vars if var.get()]
+        update_instance_status()
+        run_selected_instances(selected_instances)
+
+    def select_all_1143():
+        for var, instance in vars_1143:
+            var.set(True)
+
+    def deselect_all_1143():
+        for var, instance in vars_1143:
+            var.set(False)
+
+    def select_all_1220():
+        for var, instance in vars_1220:
+            var.set(True)
+
+    def deselect_all_1220():
+        for var, instance in vars_1220:
+            var.set(False)
+
+
+
+    root = tk.Tk()
+    root.title("Выбор инстансов")
+    root.geometry("600x400")
+    root.configure(bg="white")
+
+    label = tk.Label(root, text="Выберите инстансы для обхода:", bg="white", font=("Helvetica", 14))
+    label.pack(padx=20, pady=10)
+
+    frame_1143 = ttk.Frame(root)
+    frame_1143.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    canvas_1143 = tk.Canvas(frame_1143, bg="white")
+    canvas_1143.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    scrollbar_1143 = ttk.Scrollbar(frame_1143, orient="vertical", command=canvas_1143.yview)
+    scrollbar_1143.pack(side=tk.RIGHT, fill=tk.Y)
+
+    scrollable_frame_1143 = ttk.Frame(canvas_1143, style="Custom.TFrame")
+    scrollable_frame_1143.bind(
+        "<Configure>",
+        lambda e: canvas_1143.configure(
+            scrollregion=canvas_1143.bbox("all")
+        )
+    )
+
+    canvas_1143.create_window((0, 0), window=scrollable_frame_1143, anchor="nw")
+    canvas_1143.configure(yscrollcommand=scrollbar_1143.set)
+    canvas_1143.bind_all("<MouseWheel>", lambda event: canvas_1143.yview_scroll(int(-1 * (event.delta / 120)), "units"))
+
+    frame_1220 = ttk.Frame(root)
+    frame_1220.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    canvas_1220 = tk.Canvas(frame_1220, bg="white")
+    canvas_1220.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    scrollbar_1220 = ttk.Scrollbar(frame_1220, orient="vertical", command=canvas_1220.yview)
+    scrollbar_1220.pack(side=tk.RIGHT, fill=tk.Y)
+
+    scrollable_frame_1220 = ttk.Frame(canvas_1220, style="Custom.TFrame")
+    scrollable_frame_1220.bind(
+        "<Configure>",
+        lambda e: canvas_1220.configure(
+            scrollregion=canvas_1220.bbox("all")
+        )
+    )
+
+    canvas_1220.create_window((0, 0), window=scrollable_frame_1220, anchor="nw")
+    canvas_1220.configure(yscrollcommand=scrollbar_1220.set)
+    canvas_1220.bind_all("<MouseWheel>", lambda event: canvas_1220.yview_scroll(int(-1 * (event.delta / 120)), "units"))
+
+    vars = []
+    vars_1143 = []
+    vars_1220 = []
+
+    label_1143 = tk.Label(scrollable_frame_1143, text="1143", bg="white", font=("Helvetica", 12, "bold"))
+    label_1143.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+
+    select_all_button_1143 = tk.Button(scrollable_frame_1143, text="Выбрать все", command=select_all_1143)
+    select_all_button_1143.grid(row=0, column=1, padx=10, pady=5)
+
+    deselect_all_button_1143 = tk.Button(scrollable_frame_1143, text="Снять выделение", command=deselect_all_1143)
+    deselect_all_button_1143.grid(row=0, column=2, padx=10, pady=5)
+
+    row_counter = 1
+    for instance in instance_queue_1143:
+        var = tk.BooleanVar()
+        last_run_time = state["last_run_times"].get(instance, "Никогда")
+        label = tk.Label(scrollable_frame_1143, text=f'{instance_dict[instance]["Name"]} (последний запуск: {last_run_time})', bg="white")
+        chk = tk.Checkbutton(scrollable_frame_1143, variable=var, bg="white")
+        chk.grid(row=row_counter, column=0, sticky="w")
+        label.grid(row=row_counter, column=1, sticky="w")
+        vars.append((var, instance, label))
+        vars_1143.append((var, instance, label))
+        row_counter += 1
+
+    label_1220 = tk.Label(scrollable_frame_1220, text="1220", bg="white", font=("Helvetica", 12, "bold"))
+    label_1220.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+
+    select_all_button_1220 = tk.Button(scrollable_frame_1220, text="Выбрать все", command=select_all_1220)
+    select_all_button_1220.grid(row=0, column=1, padx=10, pady=5)
+
+    deselect_all_button_1220 = tk.Button(scrollable_frame_1220, text="Снять выделение", command=deselect_all_1220)
+    deselect_all_button_1220.grid(row=0, column=2, padx=10, pady=5)
+
+    row_counter = 1
+    for instance in instance_queue_1220:
+        var = tk.BooleanVar()
+        last_run_time = state["last_run_times"].get(instance, "Никогда")
+        label = tk.Label(scrollable_frame_1220, text=f'{instance_dict[instance]["Name"]} (последний запуск: {last_run_time})', bg="white")
+        chk = tk.Checkbutton(scrollable_frame_1220, variable=var, bg="white")
+        chk.grid(row=row_counter, column=0, sticky="w")
+        label.grid(row=row_counter, column=1, sticky="w")
+        vars.append((var, instance, label))
+        vars_1220.append((var, instance, label))
+        row_counter += 1
+
+    submit_button = tk.Button(root, text="Подтвердить", command=on_submit, bg="lightblue", font=("Helvetica", 12))
+    submit_button.pack(pady=10)
+
+    instance_entry = tk.Entry(root, font=("Helvetica", 12))
+    instance_entry.pack(pady=10)
+
+    add_instance_button = tk.Button(root, text="Добавить инстанс", command=add_instance_to_pool, bg="lightgreen", font=("Helvetica", 12))
+    add_instance_button.pack(pady=10)
+
+    root.mainloop()
+    return selected_instances
+
+def perform_actions(instance):
+    name = instance_dict[instance]["Name"]
+    port = instance_dict[instance]["port"]
+
+    time.sleep(random.randint(1, 3))
+    raki.run_instance(instance)
+
+    while True:
+        time.sleep(10)
+        try:
+            os.system("adb connect 127.0.0.1:" + port)
+            device = client.device(f'127.0.0.1:{port}')
+            screenshot = device.screencap()
+            if this_fucking_game_run_or_not(screenshot):
+                template_path = 'main_ico.png'
+                find_and_click_image(device, template_path)
+
+            if where_i_am(screenshot):
+                break
+        except Exception as e:
+            print(e)
+
+    random.randint(1, 15)
+    harvest(device)
+    time.sleep(5)
+    cr.collect_res(device)
+    time.sleep(5)
+    al_tech(device)
+    time.sleep(5)
+    dig(device)
+
+    state["last_run_times"][instance] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+    raki.kill_instance(name)
+    state["instances_done"].append(instance)
+    save_state(state)
+    update_instance_status()
+
+def main():
+    global state
+    state = load_state()
+
+    if ask_to_continue() == "startover":
+        state = {"instances_done": [], "last_run_times": {}}
+        selected_instances = select_instances()
+        instance_queue = [i for i in instances if i in selected_instances]
+    else:
+        instance_queue = list(instances)
+        instance_queue = [i for i in instance_queue if i not in state["instances_done"]]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(perform_actions, instance) for instance in instance_queue[:max_workers]}
+        instance_queue = instance_queue[max_workers:]
+
+        while futures:
+            done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+
+            for future in done:
+                try:
+                    future.result()
+                except Exception as exc:
+                    print(f'Task raised an exception: {exc}')
+                    return
+
+                futures.remove(future)
+
+                if instance_queue:
+                    instance = instance_queue.pop(0)
+                    futures.add(executor.submit(perform_actions, instance))
+
+    print("All instances completed")
+
+if __name__ == "__main__":
+    main()
+
